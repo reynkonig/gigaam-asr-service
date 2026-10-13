@@ -292,9 +292,14 @@ class AsrProcessPool:
     ) -> None:
         self.settings = settings
         self.context = context or multiprocessing.get_context("spawn")
+        worker_devices = [
+            device
+            for device in settings.devices
+            for _ in range(settings.replicas_per_device)
+        ]
         self.workers = [
             ReplicaProcess(settings, device, index, self.context)
-            for index, device in enumerate(settings.devices)
+            for index, device in enumerate(worker_devices)
         ]
         self._available: queue.Queue[ReplicaProcess] = queue.Queue(
             maxsize=len(self.workers)
@@ -489,8 +494,8 @@ class AsrProcessPool:
 
 class InProcessBackend:
     def __init__(self, settings: ServerSettings) -> None:
-        if len(settings.devices) != 1:
-            raise ValueError("in-process backend supports exactly one device")
+        if len(settings.devices) != 1 or settings.replicas_per_device != 1:
+            raise ValueError("in-process backend supports exactly one replica")
         self.engine = GigaAmEngine(settings, settings.devices[0])
 
     @property

@@ -34,6 +34,11 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="DEVICE[,DEVICE...]",
         help="model replica devices, for example cuda:0,cuda:1",
     )
+    parser.add_argument(
+        "--replicas-per-device",
+        type=int,
+        help="model process replicas to run on each selected device",
+    )
     parser.add_argument("--max-upload-bytes", type=int)
     parser.add_argument("--max-audio-seconds", type=float)
     parser.add_argument(
@@ -61,6 +66,7 @@ def settings_from_args(args: argparse.Namespace) -> ServerSettings:
         "host",
         "port",
         "devices",
+        "replicas_per_device",
         "max_upload_bytes",
         "max_audio_seconds",
         "local_files_only",

@@ -45,6 +45,13 @@ class CommandLineConfigurationTest(unittest.TestCase):
         self.assertNotIn("--model", options)
         self.assertNotIn("--revision", options)
 
+    def test_cli_configures_replicas_per_device(self) -> None:
+        with patch.dict(os.environ, {"ASR_REPLICAS_PER_DEVICE": "8"}, clear=True):
+            settings = settings_from_args(
+                self.parse("--device", "cuda:0", "--replicas-per-device", "2")
+            )
+        self.assertEqual(settings.replicas_per_device, 2)
+
     def test_cli_validation_runs_after_overrides(self) -> None:
         with (
             patch.dict(os.environ, {}, clear=True),

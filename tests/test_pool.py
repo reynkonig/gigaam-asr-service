@@ -114,6 +114,15 @@ class DeviceIsolationTest(unittest.TestCase):
 
 
 class ProcessPoolTest(unittest.TestCase):
+    def test_replicas_per_device_repeat_each_device(self) -> None:
+        settings = make_settings(
+            devices=("cuda:0", "cuda:1"),
+            replicas_per_device=2,
+        )
+        with fake_pool(settings) as pool:
+            devices = [worker.device for worker in pool.workers]
+        self.assertEqual(devices, ["cuda:0", "cuda:0", "cuda:1", "cuda:1"])
+
     def test_requests_rotate_across_replicas(self) -> None:
         settings = make_settings(devices=("cuda:0", "cuda:1"))
         with fake_pool(settings) as pool:
@@ -177,8 +186,12 @@ class ProcessPoolTest(unittest.TestCase):
 
 class InProcessBackendTest(unittest.TestCase):
     def test_multiple_devices_are_rejected(self) -> None:
-        with self.assertRaisesRegex(ValueError, "exactly one device"):
+        with self.assertRaisesRegex(ValueError, "exactly one replica"):
             InProcessBackend(make_settings(devices=("cuda:0", "cuda:1")))
+
+    def test_multiple_replicas_are_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "exactly one replica"):
+            InProcessBackend(make_settings(replicas_per_device=2))
 
 
 if __name__ == "__main__":

@@ -26,9 +26,17 @@ One model replica per GPU:
 ASR_DEVICES=cuda:0,cuda:1
 ```
 
-Replicas increase request throughput. Keep one Uvicorn worker because every
-Uvicorn worker would create another model pool. Docker GPU access requires the
-NVIDIA Container Toolkit.
+Multiple replicas can share a GPU when it has enough memory:
+
+```dotenv
+ASR_DEVICES=cuda:0
+ASR_REPLICAS_PER_DEVICE=2
+```
+
+Replicas increase concurrent request throughput and each replica loads another
+full model copy. Keep one Uvicorn worker because every Uvicorn worker would
+create another model pool. Docker GPU access requires the NVIDIA Container
+Toolkit.
 
 ## API
 

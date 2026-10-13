@@ -58,6 +58,7 @@ def _devices(value: str) -> tuple[str, ...]:
 @dataclass(frozen=True)
 class ServerSettings:
     devices: tuple[str, ...] = ("auto",)
+    replicas_per_device: int = 1
     local_files_only: bool = False
     max_upload_bytes: int = 25 * 1024 * 1024
     max_audio_seconds: float = 24.0
@@ -84,6 +85,8 @@ class ServerSettings:
                 raise ValueError(
                     "devices must contain only auto, cpu, or cuda device indexes"
                 )
+        if not 1 <= self.replicas_per_device <= 32:
+            raise ValueError("replicas_per_device must be between 1 and 32")
         if self.max_upload_bytes < 1:
             raise ValueError("max_upload_bytes must be positive")
         if not math.isfinite(self.max_audio_seconds) or not (
@@ -118,6 +121,7 @@ class ServerSettings:
         )
         values: dict[str, object] = {
             "devices": _devices(devices_value),
+            "replicas_per_device": _integer("ASR_REPLICAS_PER_DEVICE", 1),
             "local_files_only": _boolean("ASR_LOCAL_FILES_ONLY", False),
             "max_upload_bytes": _integer("ASR_MAX_UPLOAD_BYTES", 25 * 1024 * 1024),
             "max_audio_seconds": _float("ASR_MAX_AUDIO_SECONDS", 24.0),

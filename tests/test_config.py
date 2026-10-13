@@ -20,6 +20,7 @@ class ServerSettingsTest(unittest.TestCase):
     def test_environment_builds_replica_settings(self) -> None:
         environment = {
             "ASR_DEVICES": "cuda,cuda:2",
+            "ASR_REPLICAS_PER_DEVICE": "2",
             "ASR_MAX_UPLOAD_BYTES": "4096",
             "ASR_MAX_AUDIO_SECONDS": "22",
             "ASR_MAX_PENDING_REQUESTS": "7",
@@ -31,6 +32,7 @@ class ServerSettingsTest(unittest.TestCase):
             settings = ServerSettings.from_env()
 
         self.assertEqual(settings.devices, ("cuda:0", "cuda:2"))
+        self.assertEqual(settings.replicas_per_device, 2)
         self.assertEqual(settings.max_upload_bytes, 4096)
         self.assertEqual(settings.max_audio_seconds, 22)
         self.assertEqual(settings.max_pending_requests, 7)
@@ -41,6 +43,7 @@ class ServerSettingsTest(unittest.TestCase):
         with patch.dict(os.environ, {"ASR_DEVICE": "cpu"}, clear=True):
             settings = ServerSettings.from_env()
         self.assertEqual(settings.devices, ("cpu",))
+        self.assertEqual(settings.replicas_per_device, 1)
 
     def test_invalid_devices_are_rejected(self) -> None:
         cases = [
@@ -60,6 +63,8 @@ class ServerSettingsTest(unittest.TestCase):
             ({"max_upload_bytes": 0}, "max_upload_bytes"),
             ({"max_audio_seconds": 25}, "max_audio_seconds"),
             ({"max_pending_requests": -1}, "max_pending_requests"),
+            ({"replicas_per_device": 0}, "replicas_per_device"),
+            ({"replicas_per_device": 33}, "replicas_per_device"),
             ({"queue_timeout_seconds": 0}, "queue_timeout_seconds"),
             ({"port": 0}, "port"),
         ]
