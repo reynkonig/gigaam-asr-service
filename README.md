@@ -2,7 +2,8 @@
 
 OpenAI-compatible transcription service for one fixed model:
 `gigaam-v3-e2e-rnnt`, backed by `ai-sage/GigaAM-v3` at the pinned revision
-`7655ad717f8122257385bb4b2f373db3697e8680`.
+`7655ad717f8122257385bb4b2f373db3697e8680`. Inference uses FP32 ONNX Runtime;
+PyTorch is only needed for the one-time model export.
 
 The service returns Russian text only. It does not run VAD, speaker
 diarization, or timestamp generation. Uploads must be short chunks of at most
@@ -13,12 +14,29 @@ roles must split channels before sending requests.
 
 ```bash
 cp .env.example .env
-docker compose up --build -d
+mkdir -p .local/cache/huggingface
+docker compose run --build --rm export-model
+docker compose up --build -d gigaam-asr-service
 docker compose logs -f gigaam-asr-service
 ```
 
-The API listens on `127.0.0.1:8090` by default. Model files are stored in the
-`gigaam-asr-hf-cache` Docker volume.
+The exporter initializes the cache as container root, including with rootless
+Docker. The serving process runs as the non-root `app` user.
+The API listens on `127.0.0.1:8090` by default. Model files are stored in
+`.local/cache/huggingface`, mounted at `/cache/huggingface`. The exporter downloads
+the pinned weights, checks the NumPy frontend and all ONNX networks against PyTorch,
+and writes the ONNX graphs, tokenizer, and frontend constants to
+`$HF_HOME/onnx/7655ad717f8122257385bb4b2f373db3697e8680`. Repeating the export
+reuses the completed artifacts. Keep this cache when replacing the serving image.
+
+The serving image contains ONNX Runtime and its CUDA/cuDNN libraries, with no
+PyTorch, Transformers, or Triton. The encoder uses the selected device; the small
+prediction networks run on CPU. Startup requires the exported files and does
+not download models. `ASR_LOCAL_FILES_ONLY` remains accepted; inference always
+reads local artifacts. To export offline from cached Hugging Face weights, append
+`--local-files-only` to the export command. The exporter image can be built on a
+machine without a GPU and is not needed on the serving host after copying the
+exported directory to the same cache location.
 
 One model replica per GPU:
 
@@ -71,7 +89,11 @@ Python 3.13, `uv`, `ffmpeg`, and `ffprobe` are required.
 uv sync
 uv run python -m unittest
 uv run ruff check .
+uv run --group export python -m gigaam_asr_service.export_onnx
 uv run gigaam-asr-server --devices cpu --in-process
 ```
+
+For local GPU inference, install the CUDA libraries with `uv sync --group cuda`
+and use `uv run --group cuda gigaam-asr-server --devices cuda:0`.
 
 Use TLS or an SSH tunnel when exposing the service over a network.

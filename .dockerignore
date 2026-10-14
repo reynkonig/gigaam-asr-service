@@ -3,6 +3,7 @@
 .gitignore
 .idea
 .venv
+.local
 __pycache__
 *.py[cod]
 tests

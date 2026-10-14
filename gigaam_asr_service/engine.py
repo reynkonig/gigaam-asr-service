@@ -5,12 +5,14 @@ import math
 import shutil
 import subprocess
 import threading
-import types
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .config import MODEL_REVISION, MODEL_SOURCE, ServerSettings
+import numpy as np
+
+from .config import ServerSettings
+from .onnx_model import OnnxModel, model_directory
 
 LOGGER = logging.getLogger(__name__)
 
@@ -34,7 +36,6 @@ class GigaAmEngine:
         self.settings = settings
         self.requested_device = device
         self._model: Any = None
-        self._torch: Any = None
         self._resolved_device: str | None = None
         self._load_lock = threading.Lock()
         self._inference_lock = threading.Lock()
@@ -56,33 +57,6 @@ class GigaAmEngine:
             "dtype": "float32",
         }
 
-    def _resolve_device(self, torch: Any) -> Any:
-        requested = self.requested_device
-        if requested == "auto":
-            requested = "cuda:0" if torch.cuda.is_available() else "cpu"
-        device = torch.device(requested)
-        if device.type == "cuda":
-            if not torch.cuda.is_available():
-                raise AsrServiceError(
-                    f"CUDA device {requested!r} was requested but CUDA is unavailable"
-                )
-            index = device.index if device.index is not None else 0
-            if index >= torch.cuda.device_count():
-                raise AsrServiceError(
-                    f"CUDA device {requested!r} does not exist; "
-                    f"visible device count is {torch.cuda.device_count()}"
-                )
-        return device
-
-    @staticmethod
-    def _cuda_fp32_forward(
-        model: Any,
-        features: Any,
-        feature_lengths: Any,
-    ) -> tuple[Any, Any]:
-        features, feature_lengths = model.preprocessor(features, feature_lengths)
-        return model.encoder(features.float(), feature_lengths)
-
     def load(self) -> None:
         if self._model is not None:
             return
@@ -93,22 +67,7 @@ class GigaAmEngine:
                 if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
                     raise AsrServiceError("ffmpeg and ffprobe are required")
 
-                import torch
-                from transformers import AutoModel
-
-                device = self._resolve_device(torch)
-                model = AutoModel.from_pretrained(
-                    MODEL_SOURCE,
-                    revision=MODEL_REVISION,
-                    trust_remote_code=True,
-                    local_files_only=self.settings.local_files_only,
-                )
-                if device.type == "cuda":
-                    model.model.forward = types.MethodType(
-                        self._cuda_fp32_forward,
-                        model.model,
-                    )
-                model = model.float().to(device).eval()
+                model = OnnxModel(model_directory(), self.requested_device)
             except AsrServiceError as error:
                 self._last_error = type(error).__name__
                 raise
@@ -116,12 +75,11 @@ class GigaAmEngine:
                 self._last_error = type(error).__name__
                 LOGGER.exception("Failed to load GigaAM on %s", self.requested_device)
                 raise AsrServiceError(
-                    f"failed to load GigaAM on {self.requested_device}"
+                    f"failed to load GigaAM on {self.requested_device}: {error}"
                 ) from error
 
-            self._torch = torch
             self._model = model
-            self._resolved_device = str(device)
+            self._resolved_device = model.resolved_device
             self._last_error = None
 
     def _duration_seconds(self, audio_path: str) -> float:
@@ -154,23 +112,54 @@ class GigaAmEngine:
             )
         return duration
 
+    def _load_audio(self, audio_path: str) -> np.ndarray:
+        try:
+            completed = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-nostdin",
+                    "-v",
+                    "error",
+                    "-i",
+                    audio_path,
+                    "-t",
+                    str(self.settings.max_audio_seconds + 0.1),
+                    "-f",
+                    "s16le",
+                    "-ac",
+                    "1",
+                    "-acodec",
+                    "pcm_s16le",
+                    "-ar",
+                    "16000",
+                    "-",
+                ],
+                capture_output=True,
+                check=True,
+                timeout=self.settings.inference_timeout_seconds,
+            )
+            audio = (
+                np.frombuffer(completed.stdout, dtype="<i2").astype(np.float32)
+                / 32768.0
+            )
+        except (OSError, subprocess.SubprocessError, ValueError) as error:
+            raise AsrValidationError("audio file could not be decoded") from error
+        if audio.size < 320:
+            raise AsrValidationError("audio must contain at least 20 ms of samples")
+        if audio.size > self.settings.max_audio_seconds * 16000:
+            raise AsrValidationError(
+                "decoded audio exceeds the configured duration limit"
+            )
+        return audio
+
     def transcribe(self, audio_path: str | Path) -> TranscriptionResult:
         duration = self._duration_seconds(str(audio_path))
         self.load()
         assert self._model is not None
-        assert self._torch is not None
+        audio = self._load_audio(str(audio_path))
         try:
-            with self._inference_lock, self._torch.inference_mode():
-                text = self._model.transcribe(str(audio_path))
-        except ValueError as error:
-            if "too long" in str(error).lower():
-                raise AsrValidationError(
-                    "audio is too long for the GigaAM short-form decoder"
-                ) from error
-            self._last_error = type(error).__name__
-            raise AsrServiceError(
-                f"GigaAM inference failed on {self.requested_device}"
-            ) from error
+            with self._inference_lock:
+                text = self._model.transcribe(audio)
         except Exception as error:
             self._last_error = type(error).__name__
             LOGGER.exception("GigaAM inference failed on %s", self.requested_device)

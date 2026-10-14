@@ -26,7 +26,7 @@ services:
     ports:
       - "${ASR_BIND_ADDRESS:-127.0.0.1}:${ASR_PUBLISHED_PORT:-8090}:8090"
     volumes:
-      - hf-cache:/cache/huggingface
+      - .local/cache/huggingface:/cache/huggingface
     shm_size: ${ASR_SHM_SIZE:-1gb}
     stop_grace_period: 45s
     healthcheck:
@@ -40,6 +40,13 @@ services:
       start_period: 10s
       retries: 3
 
-volumes:
-  hf-cache:
-    name: ${HF_CACHE_VOLUME:-gigaam-asr-hf-cache}
+  export-model:
+    profiles: [export]
+    build:
+      context: .
+      target: exporter
+    image: gigaam-asr-service:exporter
+    environment:
+      HF_HOME: /cache/huggingface
+    volumes:
+      - .local/cache/huggingface:/cache/huggingface

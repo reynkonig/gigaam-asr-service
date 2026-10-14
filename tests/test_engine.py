@@ -1,187 +1,62 @@
-import contextlib
 import subprocess
-import sys
-import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from gigaam_asr_service.config import MODEL_REVISION, MODEL_SOURCE
-from gigaam_asr_service.engine import (
-    AsrServiceError,
-    AsrValidationError,
-    GigaAmEngine,
-)
+import numpy as np
+
+from gigaam_asr_service.engine import AsrServiceError, AsrValidationError, GigaAmEngine
 from tests.helpers import make_settings
 
 
-class FakeDevice:
-    def __init__(self, value: str) -> None:
-        self.value = value
-        self.type = value.split(":", 1)[0]
-        self.index = int(value.split(":", 1)[1]) if ":" in value else None
-
-    def __str__(self) -> str:
-        return self.value
-
-
-class FakeCuda:
-    def __init__(self, available: bool = True, count: int = 1) -> None:
-        self.available = available
-        self.count = count
-
-    def is_available(self) -> bool:
-        return self.available
-
-    def device_count(self) -> int:
-        return self.count
-
-
-class FakeInnerModel:
-    def __init__(self) -> None:
-        self.forward = self.original_forward
-
-    def original_forward(self, features, lengths):
-        return features, lengths
-
-    def preprocessor(self, features, lengths):
-        return features, lengths
-
-    def encoder(self, features, lengths):
-        return features, lengths
-
-
 class FakeModel:
-    def __init__(self) -> None:
-        self.model = FakeInnerModel()
-        self.float_calls = 0
-        self.to_calls: list[str] = []
-        self.eval_calls = 0
-        self.output: object = "распознанный текст"
+    resolved_device = "cpu"
+    output: object = "распознанный текст"
 
-    def float(self):
-        self.float_calls += 1
-        return self
-
-    def to(self, device):
-        self.to_calls.append(str(device))
-        return self
-
-    def eval(self):
-        self.eval_calls += 1
-        return self
-
-    def transcribe(self, _: str) -> object:
+    def transcribe(self, audio: np.ndarray) -> object:
         return self.output
 
 
-def fake_runtime(
-    model: FakeModel,
-    *,
-    cuda_available: bool = True,
-    cuda_count: int = 1,
-):
-    torch_module = types.ModuleType("torch")
-    torch_module.cuda = FakeCuda(cuda_available, cuda_count)
-    torch_module.device = FakeDevice
-    torch_module.inference_mode = contextlib.nullcontext
-
-    calls: list[tuple[str, dict[str, object]]] = []
-
-    class AutoModel:
-        @staticmethod
-        def from_pretrained(source: str, **kwargs: object) -> FakeModel:
-            calls.append((source, kwargs))
-            return model
-
-    transformers_module = types.ModuleType("transformers")
-    transformers_module.AutoModel = AutoModel
-    return torch_module, transformers_module, calls
-
-
 class GigaAmEngineTest(unittest.TestCase):
-    def test_cuda_load_uses_pinned_model_and_forced_fp32_forward(self) -> None:
+    def test_load_uses_onnx_artifacts_and_requested_device_once(self) -> None:
         model = FakeModel()
-        torch_module, transformers_module, calls = fake_runtime(model)
+        model.resolved_device = "cuda:0"
         engine = GigaAmEngine(make_settings(devices=("cuda:0",)), "cuda:0")
-
         with (
-            patch.dict(
-                sys.modules,
-                {"torch": torch_module, "transformers": transformers_module},
+            patch(
+                "gigaam_asr_service.engine.model_directory", return_value=Path("cache")
             ),
+            patch("gigaam_asr_service.engine.OnnxModel", return_value=model) as factory,
             patch("gigaam_asr_service.engine.shutil.which", return_value="/bin/tool"),
         ):
             engine.load()
-
-        self.assertEqual(
-            calls,
-            [
-                (
-                    MODEL_SOURCE,
-                    {
-                        "revision": MODEL_REVISION,
-                        "trust_remote_code": True,
-                        "local_files_only": False,
-                    },
-                )
-            ],
-        )
-        self.assertEqual(model.float_calls, 1)
-        self.assertEqual(model.to_calls, ["cuda:0"])
-        self.assertEqual(model.eval_calls, 1)
-        self.assertIs(model.model.forward.__func__, GigaAmEngine._cuda_fp32_forward)
+            engine.load()
+        factory.assert_called_once_with(Path("cache"), "cuda:0")
         self.assertEqual(engine.snapshot()["dtype"], "float32")
         self.assertEqual(engine.snapshot()["resolved_device"], "cuda:0")
 
-    def test_cpu_load_keeps_official_forward(self) -> None:
-        model = FakeModel()
-        original = model.model.forward
-        torch_module, transformers_module, _ = fake_runtime(
-            model,
-            cuda_available=False,
-        )
+    def test_load_failure_is_reported_and_can_be_retried(self) -> None:
         engine = GigaAmEngine(make_settings(), "cpu")
         with (
-            patch.dict(
-                sys.modules,
-                {"torch": torch_module, "transformers": transformers_module},
-            ),
             patch("gigaam_asr_service.engine.shutil.which", return_value="/bin/tool"),
+            patch(
+                "gigaam_asr_service.engine.OnnxModel",
+                side_effect=ValueError("export first"),
+            ),
+            self.assertLogs("gigaam_asr_service.engine", level="ERROR"),
+            self.assertRaisesRegex(AsrServiceError, "export first"),
         ):
             engine.load()
-        self.assertEqual(model.model.forward, original)
-        self.assertEqual(model.to_calls, ["cpu"])
-
-    def test_unavailable_or_missing_cuda_device_is_rejected(self) -> None:
-        model = FakeModel()
-        for available, count, requested, message in (
-            (False, 0, "cuda:0", "unavailable"),
-            (True, 1, "cuda:2", "does not exist"),
+        self.assertFalse(engine.loaded)
+        self.assertEqual(engine.snapshot()["state"], "failed")
+        with (
+            patch("gigaam_asr_service.engine.shutil.which", return_value="/bin/tool"),
+            patch("gigaam_asr_service.engine.OnnxModel", return_value=FakeModel()),
         ):
-            with self.subTest(requested=requested):
-                torch_module, transformers_module, _ = fake_runtime(
-                    model,
-                    cuda_available=available,
-                    cuda_count=count,
-                )
-                engine = GigaAmEngine(make_settings(devices=(requested,)), requested)
-                with (
-                    patch.dict(
-                        sys.modules,
-                        {
-                            "torch": torch_module,
-                            "transformers": transformers_module,
-                        },
-                    ),
-                    patch(
-                        "gigaam_asr_service.engine.shutil.which",
-                        return_value="/bin/tool",
-                    ),
-                    self.assertRaisesRegex(AsrServiceError, message),
-                ):
-                    engine.load()
+            engine.load()
+        self.assertEqual(engine.snapshot()["state"], "ready")
+        self.assertIsNone(engine.snapshot()["last_error"])
 
     def test_duration_probe_validates_media_and_limit(self) -> None:
         engine = GigaAmEngine(make_settings(max_audio_seconds=10), "cpu")
@@ -191,20 +66,15 @@ class GigaAmEngineTest(unittest.TestCase):
         ) as run:
             self.assertEqual(engine._duration_seconds("sample.wav"), 4.25)
         self.assertIn("ffprobe", run.call_args.args[0][0])
-
         for outcome, message in (
             (SimpleNamespace(stdout="11"), "exceeds"),
             (SimpleNamespace(stdout="nan"), "positive"),
         ):
             with (
-                patch(
-                    "gigaam_asr_service.engine.subprocess.run",
-                    return_value=outcome,
-                ),
+                patch("gigaam_asr_service.engine.subprocess.run", return_value=outcome),
                 self.assertRaisesRegex(AsrValidationError, message),
             ):
                 engine._duration_seconds("sample.wav")
-
         with (
             patch(
                 "gigaam_asr_service.engine.subprocess.run",
@@ -214,13 +84,55 @@ class GigaAmEngineTest(unittest.TestCase):
         ):
             engine._duration_seconds("broken.wav")
 
+    def test_decoded_audio_is_normalized_and_checked_against_limit(self) -> None:
+        engine = GigaAmEngine(make_settings(max_audio_seconds=1), "cpu")
+        pcm = np.full(16000, -32768, dtype="<i2").tobytes()
+        with patch(
+            "gigaam_asr_service.engine.subprocess.run",
+            return_value=SimpleNamespace(stdout=pcm),
+        ) as run:
+            audio = engine._load_audio("sample.wav")
+        np.testing.assert_array_equal(audio, np.full(16000, -1, dtype=np.float32))
+        self.assertEqual(run.call_args.kwargs["timeout"], 1.0)
+        for pcm, message in (
+            (b"", "20 ms"),
+            (np.zeros(16001, dtype="<i2").tobytes(), "duration limit"),
+            (b"x", "could not be decoded"),
+        ):
+            with (
+                self.subTest(message=message),
+                patch(
+                    "gigaam_asr_service.engine.subprocess.run",
+                    return_value=SimpleNamespace(stdout=pcm),
+                ),
+                self.assertRaisesRegex(AsrValidationError, message),
+            ):
+                engine._load_audio("sample.wav")
+
+    def test_audio_decode_failure_is_validation_error(self) -> None:
+        engine = GigaAmEngine(make_settings(), "cpu")
+        for error in (
+            subprocess.CalledProcessError(1, ["ffmpeg"]),
+            subprocess.TimeoutExpired(["ffmpeg"], 1),
+        ):
+            with (
+                self.subTest(error=type(error)),
+                patch("gigaam_asr_service.engine.subprocess.run", side_effect=error),
+                self.assertRaisesRegex(AsrValidationError, "could not be decoded"),
+            ):
+                engine._load_audio("broken.wav")
+
     def test_transcription_is_trimmed_and_preserves_duration(self) -> None:
         model = FakeModel()
         model.output = "  готовый текст  "
         engine = GigaAmEngine(make_settings(), "cpu")
         engine._model = model
-        engine._torch = SimpleNamespace(inference_mode=contextlib.nullcontext)
-        with patch.object(engine, "_duration_seconds", return_value=2.5):
+        with (
+            patch.object(engine, "_duration_seconds", return_value=2.5),
+            patch.object(
+                engine, "_load_audio", return_value=np.zeros(16000, np.float32)
+            ),
+        ):
             result = engine.transcribe(Path("sample.wav"))
         self.assertEqual(result.text, "готовый текст")
         self.assertEqual(result.duration_seconds, 2.5)
@@ -230,9 +142,11 @@ class GigaAmEngineTest(unittest.TestCase):
         model.output = None
         engine = GigaAmEngine(make_settings(), "cpu")
         engine._model = model
-        engine._torch = SimpleNamespace(inference_mode=contextlib.nullcontext)
         with (
             patch.object(engine, "_duration_seconds", return_value=1.0),
+            patch.object(
+                engine, "_load_audio", return_value=np.zeros(16000, np.float32)
+            ),
             self.assertRaisesRegex(AsrServiceError, "invalid transcription"),
         ):
             engine.transcribe("sample.wav")

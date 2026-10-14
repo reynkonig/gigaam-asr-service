@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 FROM ghcr.io/astral-sh/uv:0.10.5 AS uv
-FROM python:3.13-slim-bookworm
+FROM python:3.13-slim-bookworm AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -22,8 +22,18 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
+
+FROM base AS exporter
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-install-project
+    uv sync --frozen --no-dev --group export --no-install-project
+COPY --chown=app:app gigaam_asr_service ./gigaam_asr_service
+# Container root can initialize cache bind mounts with rootless Docker.
+USER root
+ENTRYPOINT ["/app/.venv/bin/python", "-m", "gigaam_asr_service.export_onnx"]
+
+FROM base AS runtime
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --group cuda --no-install-project
 
 COPY --chown=app:app gigaam_asr_service ./gigaam_asr_service
 
