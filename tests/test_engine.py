@@ -1,13 +1,13 @@
-import subprocess
+import struct
+import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
 
 from gigaam_asr_service.engine import AsrServiceError, AsrValidationError, GigaAmEngine
-from tests.helpers import make_settings
+from tests.helpers import make_settings, wav_bytes
 
 
 class FakeModel:
@@ -19,6 +19,12 @@ class FakeModel:
 
 
 class GigaAmEngineTest(unittest.TestCase):
+    def audio_path(self, content: bytes) -> Path:
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        path = Path(directory) / "upload.audio"
+        path.write_bytes(content)
+        return path
+
     def test_load_uses_onnx_artifacts_and_requested_device_once(self) -> None:
         model = FakeModel()
         model.resolved_device = "cuda:0"
@@ -28,7 +34,6 @@ class GigaAmEngineTest(unittest.TestCase):
                 "gigaam_asr_service.engine.model_directory", return_value=Path("cache")
             ),
             patch("gigaam_asr_service.engine.OnnxModel", return_value=model) as factory,
-            patch("gigaam_asr_service.engine.shutil.which", return_value="/bin/tool"),
         ):
             engine.load()
             engine.load()
@@ -39,7 +44,6 @@ class GigaAmEngineTest(unittest.TestCase):
     def test_load_failure_is_reported_and_can_be_retried(self) -> None:
         engine = GigaAmEngine(make_settings(), "cpu")
         with (
-            patch("gigaam_asr_service.engine.shutil.which", return_value="/bin/tool"),
             patch(
                 "gigaam_asr_service.engine.OnnxModel",
                 side_effect=ValueError("export first"),
@@ -51,86 +55,113 @@ class GigaAmEngineTest(unittest.TestCase):
         self.assertFalse(engine.loaded)
         self.assertEqual(engine.snapshot()["state"], "failed")
         with (
-            patch("gigaam_asr_service.engine.shutil.which", return_value="/bin/tool"),
             patch("gigaam_asr_service.engine.OnnxModel", return_value=FakeModel()),
         ):
             engine.load()
         self.assertEqual(engine.snapshot()["state"], "ready")
         self.assertIsNone(engine.snapshot()["last_error"])
 
-    def test_duration_probe_validates_media_and_limit(self) -> None:
-        engine = GigaAmEngine(make_settings(max_audio_seconds=10), "cpu")
-        with patch(
-            "gigaam_asr_service.engine.subprocess.run",
-            return_value=SimpleNamespace(stdout="4.25\n"),
-        ) as run:
-            self.assertEqual(engine._duration_seconds("sample.wav"), 4.25)
-        self.assertIn("ffprobe", run.call_args.args[0][0])
-        for outcome, message in (
-            (SimpleNamespace(stdout="11"), "exceeds"),
-            (SimpleNamespace(stdout="nan"), "positive"),
-        ):
-            with (
-                patch("gigaam_asr_service.engine.subprocess.run", return_value=outcome),
-                self.assertRaisesRegex(AsrValidationError, message),
-            ):
-                engine._duration_seconds("sample.wav")
+    def test_prepared_samples_are_read_without_external_commands(self) -> None:
+        model = FakeModel()
+        engine = GigaAmEngine(make_settings(), "cpu")
+        pcm = np.tile(np.array([-32768, -1, 0, 1, 32767], dtype="<i2"), 64)
+        path = self.audio_path(wav_bytes(pcm.tobytes()))
         with (
-            patch(
-                "gigaam_asr_service.engine.subprocess.run",
-                side_effect=subprocess.CalledProcessError(1, ["ffprobe"]),
-            ),
-            self.assertRaisesRegex(AsrValidationError, "could not be decoded"),
+            patch("subprocess.run", side_effect=AssertionError("external command")),
+            patch("gigaam_asr_service.engine.OnnxModel", return_value=model),
+            patch.object(
+                model, "transcribe", return_value="  готовый текст  "
+            ) as infer,
         ):
-            engine._duration_seconds("broken.wav")
+            result = engine.transcribe(path)
+        actual = infer.call_args.args[0]
+        self.assertEqual(actual.dtype, np.float32)
+        np.testing.assert_array_equal(actual, pcm.astype(np.float32) / 32768.0)
+        self.assertEqual(result.text, "готовый текст")
+        self.assertEqual(result.duration_seconds, 0.02)
 
-    def test_decoded_audio_is_normalized_and_checked_against_limit(self) -> None:
+    def test_exact_duration_limit_is_accepted(self) -> None:
         engine = GigaAmEngine(make_settings(max_audio_seconds=1), "cpu")
         pcm = np.full(16000, -32768, dtype="<i2").tobytes()
-        with patch(
-            "gigaam_asr_service.engine.subprocess.run",
-            return_value=SimpleNamespace(stdout=pcm),
-        ) as run:
-            audio = engine._load_audio("sample.wav")
+        audio = engine._load_audio(str(self.audio_path(wav_bytes(pcm))))
         np.testing.assert_array_equal(audio, np.full(16000, -1, dtype=np.float32))
-        self.assertEqual(run.call_args.kwargs["timeout"], 1.0)
-        for pcm, message in (
-            (b"", "20 ms"),
-            (np.zeros(16001, dtype="<i2").tobytes(), "duration limit"),
-            (b"x", "could not be decoded"),
+
+    def test_duration_limits_are_checked_before_loading_model(self) -> None:
+        engine = GigaAmEngine(make_settings(max_audio_seconds=1), "cpu")
+        for frames, message in (
+            (0, "20 ms"),
+            (319, "20 ms"),
+            (16001, "duration exceeds"),
         ):
+            path = self.audio_path(wav_bytes(b"\0\0" * frames))
             with (
-                self.subTest(message=message),
-                patch(
-                    "gigaam_asr_service.engine.subprocess.run",
-                    return_value=SimpleNamespace(stdout=pcm),
-                ),
+                self.subTest(frames=frames),
+                patch("gigaam_asr_service.engine.OnnxModel") as model,
                 self.assertRaisesRegex(AsrValidationError, message),
             ):
-                engine._load_audio("sample.wav")
+                engine.transcribe(path)
+            model.assert_not_called()
 
-    def test_audio_decode_failure_is_validation_error(self) -> None:
+    def test_files_needing_conversion_are_rejected(self) -> None:
         engine = GigaAmEngine(make_settings(), "cpu")
-        for error in (
-            subprocess.CalledProcessError(1, ["ffmpeg"]),
-            subprocess.TimeoutExpired(["ffmpeg"], 1),
+        for parameters in (
+            {"channels": 2},
+            {"sample_rate": 8000},
+            {"sample_rate": 44100},
+            {"sample_width": 1},
+            {"sample_width": 3},
+            {"sample_width": 4},
+        ):
+            path = self.audio_path(wav_bytes(b"\0" * 960, **parameters))
+            with (
+                self.subTest(parameters=parameters),
+                self.assertRaisesRegex(AsrValidationError, "mono 16 kHz 16-bit PCM"),
+            ):
+                engine._load_audio(str(path))
+
+    def test_corrupt_and_truncated_files_are_rejected(self) -> None:
+        engine = GigaAmEngine(make_settings(), "cpu")
+        valid = wav_bytes(b"\0\0" * 320)
+        floating_point = bytearray(valid)
+        struct.pack_into("<H", floating_point, valid.index(b"fmt ") + 8, 3)
+        oversized_chunk = bytearray(valid)
+        struct.pack_into("<I", oversized_chunk, valid.index(b"fmt ") + 4, 1000)
+        for payload in (
+            b"",
+            b"not WAV",
+            valid[:20],
+            valid[:-1],
+            floating_point,
+            oversized_chunk,
         ):
             with (
-                self.subTest(error=type(error)),
-                patch("gigaam_asr_service.engine.subprocess.run", side_effect=error),
-                self.assertRaisesRegex(AsrValidationError, "could not be decoded"),
+                self.subTest(size=len(payload)),
+                self.assertRaises(AsrValidationError),
             ):
-                engine._load_audio("broken.wav")
+                engine._load_audio(str(self.audio_path(payload)))
 
-    def test_transcription_is_trimmed_and_preserves_duration(self) -> None:
+    def test_incomplete_sample_is_rejected(self) -> None:
+        engine = GigaAmEngine(make_settings(), "cpu")
+        malformed = bytearray(wav_bytes(b"\0\0" * 320))
+        malformed.append(0)
+        struct.pack_into("<I", malformed, 4, len(malformed) - 8)
+        struct.pack_into("<I", malformed, malformed.index(b"data") + 4, 641)
+        with self.assertRaisesRegex(AsrValidationError, "declared frame count"):
+            engine._load_audio(str(self.audio_path(malformed)))
+
+    def test_missing_file_is_validation_error(self) -> None:
+        engine = GigaAmEngine(make_settings(), "cpu")
+        with self.assertRaises(AsrValidationError):
+            engine._load_audio("/no-such-audio.wav")
+
+    def test_transcription_duration_comes_from_sample_count(self) -> None:
         model = FakeModel()
         model.output = "  готовый текст  "
         engine = GigaAmEngine(make_settings(), "cpu")
         engine._model = model
         with (
-            patch.object(engine, "_duration_seconds", return_value=2.5),
             patch.object(
-                engine, "_load_audio", return_value=np.zeros(16000, np.float32)
+                engine, "_load_audio", return_value=np.zeros(40000, np.float32)
             ),
         ):
             result = engine.transcribe(Path("sample.wav"))
@@ -143,21 +174,12 @@ class GigaAmEngineTest(unittest.TestCase):
         engine = GigaAmEngine(make_settings(), "cpu")
         engine._model = model
         with (
-            patch.object(engine, "_duration_seconds", return_value=1.0),
             patch.object(
                 engine, "_load_audio", return_value=np.zeros(16000, np.float32)
             ),
             self.assertRaisesRegex(AsrServiceError, "invalid transcription"),
         ):
             engine.transcribe("sample.wav")
-
-    def test_ffmpeg_is_required_before_model_loading(self) -> None:
-        engine = GigaAmEngine(make_settings(), "cpu")
-        with (
-            patch("gigaam_asr_service.engine.shutil.which", return_value=None),
-            self.assertRaisesRegex(AsrServiceError, "ffmpeg and ffprobe"),
-        ):
-            engine.load()
 
 
 if __name__ == "__main__":

@@ -12,10 +12,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 COPY --from=uv /uv /uvx /usr/local/bin/
 
-RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ffmpeg \
-    && rm -rf /var/lib/apt/lists/* \
-    && groupadd --system --gid 10001 app \
+RUN groupadd --system --gid 10001 app \
     && useradd --system --uid 10001 --gid app --create-home app \
     && mkdir -p /app /cache/huggingface \
     && chown -R app:app /app /cache/huggingface

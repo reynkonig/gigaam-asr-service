@@ -1,7 +1,9 @@
 import os
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+import numpy as np
 from fastapi.testclient import TestClient
 
 from gigaam_asr_service.api import create_app
@@ -11,8 +13,8 @@ from gigaam_asr_service.engine import (
     AsrValidationError,
     TranscriptionResult,
 )
-from gigaam_asr_service.pool import AsrBusyError
-from tests.helpers import make_settings
+from gigaam_asr_service.pool import AsrBusyError, InProcessBackend
+from tests.helpers import make_settings, wav_bytes
 
 
 class FakeBackend:
@@ -67,6 +69,38 @@ def audio_file(content: bytes = b"audio") -> dict[str, tuple[str, bytes, str]]:
 
 
 class TranscriptionApiTest(unittest.TestCase):
+    def test_prepared_wav_reaches_engine_and_wrong_formats_return_422(self) -> None:
+        settings = make_settings()
+        backend = InProcessBackend(settings)
+        pcm = np.full(320, -32768, dtype="<i2")
+        with (
+            patch("subprocess.run", side_effect=AssertionError("external command")),
+            patch("gigaam_asr_service.engine.OnnxModel") as factory,
+            TestClient(create_app(settings, backend=backend)) as client,
+        ):
+            factory.return_value.transcribe.return_value = "распознанный текст"
+            valid = client.post(
+                "/v1/audio/transcriptions",
+                files=audio_file(wav_bytes(pcm.tobytes())),
+            )
+            stereo = client.post(
+                "/v1/audio/transcriptions",
+                files=audio_file(wav_bytes(pcm.tobytes(), channels=2)),
+            )
+            corrupt = client.post(
+                "/v1/audio/transcriptions", files=audio_file(b"not WAV")
+            )
+        self.assertEqual(valid.status_code, 200)
+        self.assertEqual(valid.json(), {"text": "распознанный текст"})
+        self.assertEqual(valid.headers["x-audio-duration-seconds"], "0.020")
+        self.assertEqual(stereo.status_code, 422)
+        self.assertEqual(corrupt.status_code, 422)
+        factory.return_value.transcribe.assert_called_once()
+        np.testing.assert_array_equal(
+            factory.return_value.transcribe.call_args.args[0],
+            np.full(320, -1, dtype=np.float32),
+        )
+
     def test_json_contract_uses_fixed_model_and_removes_temporary_file(self) -> None:
         backend = FakeBackend()
         with TestClient(create_app(make_settings(), backend=backend)) as client:

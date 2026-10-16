@@ -6,9 +6,13 @@ OpenAI-compatible transcription service for one fixed model:
 PyTorch is only needed for the one-time model export.
 
 The service returns Russian text only. It does not run VAD, speaker
-diarization, or timestamp generation. Uploads must be short chunks of at most
-24 seconds. Stereo audio is downmixed by the model, so callers that need speaker
-roles must split channels before sending requests.
+diarization, or timestamp generation. Uploads must be prepared mono 16 kHz,
+16-bit PCM WAV chunks, between 20 ms and 24 seconds. Samples are read directly;
+the service does not decode compressed audio, resample, or mix channels. Other
+formats and incomplete WAV data return HTTP 422. Callers must split stereo
+channels before sending requests when speaker roles need to be preserved.
+Duration is calculated from the WAV sample count. FFmpeg and ffprobe are not
+needed or included in the image.
 
 ## Docker
 
@@ -83,7 +87,7 @@ one replica is loaded.
 
 ## Local development
 
-Python 3.13, `uv`, `ffmpeg`, and `ffprobe` are required.
+Python 3.13 and `uv` are required.
 
 ```bash
 uv sync

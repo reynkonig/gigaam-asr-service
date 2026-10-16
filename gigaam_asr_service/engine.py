@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import logging
-import math
-import shutil
-import subprocess
 import threading
+import wave
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -64,9 +62,6 @@ class GigaAmEngine:
             if self._model is not None:
                 return
             try:
-                if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
-                    raise AsrServiceError("ffmpeg and ffprobe are required")
-
                 model = OnnxModel(model_directory(), self.requested_device)
             except AsrServiceError as error:
                 self._last_error = type(error).__name__
@@ -82,81 +77,45 @@ class GigaAmEngine:
             self._resolved_device = model.resolved_device
             self._last_error = None
 
-    def _duration_seconds(self, audio_path: str) -> float:
-        try:
-            completed = subprocess.run(
-                [
-                    "ffprobe",
-                    "-v",
-                    "error",
-                    "-show_entries",
-                    "format=duration",
-                    "-of",
-                    "default=noprint_wrappers=1:nokey=1",
-                    audio_path,
-                ],
-                capture_output=True,
-                check=True,
-                text=True,
-                timeout=self.settings.ffprobe_timeout_seconds,
-            )
-            duration = float(completed.stdout.strip())
-        except (OSError, subprocess.SubprocessError, ValueError) as error:
-            raise AsrValidationError("audio file could not be decoded") from error
-        if not math.isfinite(duration) or duration <= 0:
-            raise AsrValidationError("audio duration must be positive")
-        if duration > self.settings.max_audio_seconds:
-            raise AsrValidationError(
-                "audio duration exceeds the configured limit of "
-                f"{self.settings.max_audio_seconds:g} seconds"
-            )
-        return duration
-
     def _load_audio(self, audio_path: str) -> np.ndarray:
         try:
-            completed = subprocess.run(
-                [
-                    "ffmpeg",
-                    "-nostdin",
-                    "-v",
-                    "error",
-                    "-i",
-                    audio_path,
-                    "-t",
-                    str(self.settings.max_audio_seconds + 0.1),
-                    "-f",
-                    "s16le",
-                    "-ac",
-                    "1",
-                    "-acodec",
-                    "pcm_s16le",
-                    "-ar",
-                    "16000",
-                    "-",
-                ],
-                capture_output=True,
-                check=True,
-                timeout=self.settings.inference_timeout_seconds,
-            )
-            audio = (
-                np.frombuffer(completed.stdout, dtype="<i2").astype(np.float32)
-                / 32768.0
-            )
-        except (OSError, subprocess.SubprocessError, ValueError) as error:
-            raise AsrValidationError("audio file could not be decoded") from error
-        if audio.size < 320:
-            raise AsrValidationError("audio must contain at least 20 ms of samples")
-        if audio.size > self.settings.max_audio_seconds * 16000:
+            with wave.open(audio_path, "rb") as audio:
+                if (
+                    audio.getnchannels(),
+                    audio.getframerate(),
+                    audio.getsampwidth(),
+                    audio.getcomptype(),
+                ) != (1, 16000, 2, "NONE"):
+                    raise AsrValidationError(
+                        "audio must be a mono 16 kHz 16-bit PCM WAV file"
+                    )
+                frames = audio.getnframes()
+                if frames < 320:
+                    raise AsrValidationError(
+                        "audio must contain at least 20 ms of samples"
+                    )
+                if frames > self.settings.max_audio_seconds * 16000:
+                    raise AsrValidationError(
+                        "audio duration exceeds the configured limit of "
+                        f"{self.settings.max_audio_seconds:g} seconds"
+                    )
+                pcm = audio.readframes(frames + 1)
+                if len(pcm) != frames * 2:
+                    raise AsrValidationError(
+                        "WAV data does not match its declared frame count"
+                    )
+        except AsrValidationError:
+            raise
+        except (OSError, EOFError, RuntimeError, wave.Error) as error:
             raise AsrValidationError(
-                "decoded audio exceeds the configured duration limit"
-            )
-        return audio
+                "audio must be a readable mono 16 kHz 16-bit PCM WAV file"
+            ) from error
+        return np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
 
     def transcribe(self, audio_path: str | Path) -> TranscriptionResult:
-        duration = self._duration_seconds(str(audio_path))
+        audio = self._load_audio(str(audio_path))
         self.load()
         assert self._model is not None
-        audio = self._load_audio(str(audio_path))
         try:
             with self._inference_lock:
                 text = self._model.transcribe(audio)
@@ -170,4 +129,6 @@ class GigaAmEngine:
             self._last_error = "InvalidModelOutput"
             raise AsrServiceError("GigaAM returned an invalid transcription")
         self._last_error = None
-        return TranscriptionResult(text=text.strip(), duration_seconds=duration)
+        return TranscriptionResult(
+            text=text.strip(), duration_seconds=audio.size / 16000
+        )

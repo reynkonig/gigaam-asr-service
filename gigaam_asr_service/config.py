@@ -67,7 +67,6 @@ class ServerSettings:
     inference_timeout_seconds: float = 300.0
     worker_restart_cooldown_seconds: float = 30.0
     shutdown_timeout_seconds: float = 30.0
-    ffprobe_timeout_seconds: float = 15.0
     preload: bool = False
     api_key: str | None = None
     host: str = "127.0.0.1"
@@ -102,7 +101,6 @@ class ServerSettings:
             "inference_timeout_seconds",
             "worker_restart_cooldown_seconds",
             "shutdown_timeout_seconds",
-            "ffprobe_timeout_seconds",
         ):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
@@ -132,7 +130,6 @@ class ServerSettings:
                 "ASR_WORKER_RESTART_COOLDOWN_SECONDS", 30.0
             ),
             "shutdown_timeout_seconds": _float("ASR_SHUTDOWN_TIMEOUT_SECONDS", 30.0),
-            "ffprobe_timeout_seconds": _float("ASR_FFPROBE_TIMEOUT_SECONDS", 15.0),
             "preload": _boolean("ASR_PRELOAD", False),
             "api_key": _optional_text(os.getenv("ASR_API_KEY")),
             "host": _optional_text(os.getenv("ASR_HOST")) or "127.0.0.1",
