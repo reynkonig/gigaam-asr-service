@@ -1,4 +1,6 @@
 .env
+/compose.override.yaml
+/compose.override.yml
 .venv/
 .local/
 .pytest_cache/

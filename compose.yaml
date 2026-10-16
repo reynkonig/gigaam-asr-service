@@ -1,33 +1,13 @@
 services:
   gigaam-asr-service:
-    build:
-      context: .
+    build: .
     image: ${ASR_IMAGE:-gigaam-asr-service:local}
     init: true
     restart: unless-stopped
     gpus: all
-    env_file:
-      - path: .env
-        required: false
-    environment:
-      ASR_HOST: 0.0.0.0
-      ASR_PORT: "8090"
-      ASR_API_KEY: ${ASR_API_KEY:?Set ASR_API_KEY in .env}
-      ASR_DEVICES: ${ASR_DEVICES:-cuda:0}
-      ASR_REPLICAS_PER_DEVICE: ${ASR_REPLICAS_PER_DEVICE:-1}
-      ASR_PRELOAD: ${ASR_PRELOAD:-false}
-      ASR_LOCAL_FILES_ONLY: ${ASR_LOCAL_FILES_ONLY:-false}
-      ASR_MAX_AUDIO_SECONDS: ${ASR_MAX_AUDIO_SECONDS:-24}
-      ASR_MAX_UPLOAD_BYTES: ${ASR_MAX_UPLOAD_BYTES:-26214400}
-      ASR_MAX_PENDING_REQUESTS: ${ASR_MAX_PENDING_REQUESTS:-32}
-      ASR_QUEUE_TIMEOUT_SECONDS: ${ASR_QUEUE_TIMEOUT_SECONDS:-30}
-      ASR_INFERENCE_TIMEOUT_SECONDS: ${ASR_INFERENCE_TIMEOUT_SECONDS:-300}
-      HF_HOME: /cache/huggingface
-    ports:
-      - "${ASR_BIND_ADDRESS:-127.0.0.1}:${ASR_PUBLISHED_PORT:-8090}:8090"
+    env_file: .env
     volumes:
       - .local/cache/huggingface:/cache/huggingface
-    shm_size: ${ASR_SHM_SIZE:-1gb}
     stop_grace_period: 45s
     healthcheck:
       test:
@@ -46,7 +26,5 @@ services:
       context: .
       target: exporter
     image: gigaam-asr-service:exporter
-    environment:
-      HF_HOME: /cache/huggingface
     volumes:
       - .local/cache/huggingface:/cache/huggingface
