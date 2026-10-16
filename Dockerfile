@@ -39,6 +39,6 @@ EXPOSE 8090
 STOPSIGNAL SIGTERM
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD ["/app/.venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=3).read()"]
+    CMD ["/app/.venv/bin/python", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.getenv('ASR_PORT', '8090') + '/healthz', timeout=3).read()"]
 
 CMD ["/app/.venv/bin/python", "-m", "gigaam_asr_service"]

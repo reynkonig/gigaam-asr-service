@@ -27,7 +27,8 @@ docker compose logs -f gigaam-asr-service
 Only three settings are needed in `.env`: your `ASR_API_KEY`, the GPU list
 (`ASR_DEVICES`), and `ASR_REPLICAS_PER_DEVICE`. Set the API key before starting.
 Limits and timeouts use application defaults; overrides can still be added to
-`.env` when needed. Compose includes an explicit healthcheck.
+`.env` when needed. Compose includes an explicit healthcheck that uses `ASR_PORT`
+(default `8090`).
 
 The exporter initializes the cache as container root, including with rootless
 Docker. The serving process runs as the non-root `app` user.

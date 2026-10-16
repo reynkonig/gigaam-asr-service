@@ -14,7 +14,7 @@ services:
         - CMD
         - /app/.venv/bin/python
         - -c
-        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=3).read()
+        - import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.getenv('ASR_PORT', '8090') + '/healthz', timeout=3).read()
       interval: 30s
       timeout: 5s
       start_period: 10s
